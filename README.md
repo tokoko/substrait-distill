@@ -61,9 +61,9 @@ manager = Manager("components/", max_iterations=20)
           ┌─────────────┼─────────────┐
           v             v             v
    ┌────────────┐ ┌──────────┐ ┌──────────┐
-   │ filter     │ │ rule     │ │ rule     │
-   │ pushdown   │ │ group B  │ │ group C  │
-   │ (.wasm)    │ │ (.wasm)  │ │ (.wasm)  │
+   │ rel rules  │ │ pred.    │ │ rule     │
+   │ (.wasm)    │ │ simplify │ │ group N  │
+   │            │ │ (.wasm)  │ │ (.wasm)  │
    └────────────┘ └──────────┘ └──────────┘
 ```
 
@@ -80,13 +80,37 @@ Plans are exchanged as serialized [Substrait](https://substrait.io/) protobuf by
 
 ## Built-in Rule Groups
 
-### filter-pushdown
+### rel-rules
 
-Pushes filter predicates closer to data sources through:
+Combined filter pushdown and projection pruning optimizations. Rules are organized into subfolders under `rules/rel_rules/` with shared helpers at the top level.
 
-- **Cross joins** -- pushes predicates to whichever side they reference, splitting AND conjunctions when possible
+**Filter pushdown** (`filter_pushdown/`) -- pushes filter predicates closer to data sources through:
+
+- **Cross joins** -- pushes predicates to whichever side they reference, splitting AND conjunctions when possible; mixed predicates convert crosses to inner joins
+- **Joins** -- pushes predicates based on join type semantics (INNER: both sides, LEFT: left only, etc.)
 - **Projects** -- pushes predicates below projections when they reference only pass-through fields
+- **Aggregates** -- pushes predicates referencing grouping keys below the aggregate
+- **Set operations** -- pushes the same predicate to all inputs
 - **Passthrough operators** -- pushes predicates through sort and fetch
+- **Reads** -- sets `best_effort_filter` as a hint for the reader
+
+**Projection pruning** (`projection_pruning/`) -- prunes unused input fields by propagating emit mappings down the tree:
+
+- **Projects** -- drops unused expressions not referenced by emit, then prunes input fields to only those needed by emit pass-through + remaining expressions
+- **Filters** -- propagates emit through filters by collecting needed fields from emit + condition, enabling cascading pruning (e.g. `select(filter(read(...)))` prunes all the way to the read)
+- **Joins** -- prunes unused fields from both sides of a join by splitting needed fields (from emit + join expression) into left/right sets and pruning each input independently
+- **Cross joins** -- same as join pruning but without expression remapping
+- **Sorts** -- propagates emit through sort by collecting needed fields from emit + sort expressions, pruning input and remapping sort expressions
+- **Fetches** -- propagates emit through fetch (offset/count are constants, so only emit fields matter)
+- **Set operations** -- prunes the same unused fields from all inputs of a set operation (all inputs share the same schema)
+
+**Simplification** (`simplification/`) -- removes redundant operators:
+
+- **Identity projects** -- removes ProjectRel nodes where the output equals the input (no expressions with identity/no emit, or all expressions are simple pass-through column references)
+
+### predicate-simplification
+
+Simplifies boolean expressions (`AND(true, x)` → `x`, `NOT(NOT(x))` → `x`, etc.) and removes `Filter` nodes with trivially true conditions.
 
 ## Adding a New Rule Group
 
@@ -119,6 +143,8 @@ bash scripts/build.sh
 
 3. The manager automatically discovers and loads all `.wasm` files in `components/`.
 
+You can also add rules to the existing `rel_rules` component by creating a new subfolder under `rules/rel_rules/` and registering the rule in `app.py`.
+
 ## Running Tests
 
 ```bash
@@ -129,5 +155,5 @@ bash scripts/build.sh
 uv run pytest
 
 # Run a specific test
-uv run pytest tests/test_filter_pushdown.py::TestFilterPushdownCross::test_pushdown_filter_to_left
+uv run pytest tests/rules/test_filter_pushdown_cross.py::TestFilterPushdownCross::test_pushdown_filter_to_left
 ```

@@ -9,7 +9,7 @@ class TestManagerLoad:
         infos = m.load_components()
         assert len(infos) == 2
         names = {info.name for info in infos}
-        assert "filter-pushdown" in names
+        assert "rel-rules" in names
         assert "predicate-simplification" in names
 
     def test_load_empty_dir(self, tmp_path):

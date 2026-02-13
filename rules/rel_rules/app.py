@@ -4,17 +4,24 @@ from substrait.plan_pb2 import Plan
 from wit_world.exports import RuleGroup
 from wit_world.imports.types import RuleGroupInfo
 
-from aggregate import push_filter_through_aggregate
-from cross import push_filter_through_cross
-from join import push_filter_through_join
-from merge import merge_adjacent_filters
-from passthrough import push_filter_through_passthrough
-from project import push_filter_through_project
-from projection import prune_project_input
-from read import push_filter_into_read
-from set_op import push_filter_through_set
+from filter_pushdown.aggregate import push_filter_through_aggregate
+from filter_pushdown.cross import push_filter_through_cross
+from filter_pushdown.join import push_filter_through_join
+from filter_pushdown.merge import merge_adjacent_filters
+from filter_pushdown.passthrough import push_filter_through_passthrough
+from filter_pushdown.project import push_filter_through_project
+from filter_pushdown.read import push_filter_into_read
+from filter_pushdown.set_op import push_filter_through_set
+from projection_pruning.cross import prune_cross_inputs
+from projection_pruning.fetch import prune_fetch_input
+from projection_pruning.filter import prune_filter_input
+from projection_pruning.join import prune_join_inputs
+from projection_pruning.projection import prune_project_input
+from projection_pruning.set_op import prune_set_inputs
+from projection_pruning.sort import prune_sort_input
+from simplification.project import remove_identity_project
 
-FILTER_RULES = [
+RULES = [
     merge_adjacent_filters,
     push_filter_through_cross,
     push_filter_through_join,
@@ -24,14 +31,21 @@ FILTER_RULES = [
     push_filter_through_passthrough,
     push_filter_into_read,
     prune_project_input,
+    prune_filter_input,
+    prune_join_inputs,
+    prune_cross_inputs,
+    prune_sort_input,
+    prune_fetch_input,
+    prune_set_inputs,
+    remove_identity_project,
 ]
 
 
 class RuleGroup(RuleGroup):
     def info(self) -> RuleGroupInfo:
         return RuleGroupInfo(
-            name="filter-pushdown",
-            description="Push filter predicates through cross joins, joins, projects, aggregates, set operations, fetches, and sorts",
+            name="rel-rules",
+            description="Filter pushdown and projection pruning optimizations",
         )
 
     def optimize(self, plan: bytes) -> bytes:
@@ -62,9 +76,9 @@ def _build_fn_names(plan: Plan) -> dict[int, str]:
 
 
 def _optimize_rel(rel: Rel, fn_names: dict[int, str]) -> Rel:
-    """Recursively optimize a relation tree by applying all filter pushdown rules."""
-    if rel.WhichOneof("rel_type") in ("filter", "project"):
-        for rule in FILTER_RULES:
+    """Recursively optimize a relation tree by applying all rules."""
+    if rel.WhichOneof("rel_type") in ("filter", "project", "join", "cross", "sort", "fetch", "set"):
+        for rule in RULES:
             result = rule(
                 rel, lambda r: _optimize_rel(r, fn_names), fn_names
             )
