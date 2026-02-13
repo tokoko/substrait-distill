@@ -12,6 +12,7 @@ from .conftest import (
     make_fetch,
     make_filter_over_cross,
     make_read,
+    materialize,
     optimize,
 )
 
@@ -803,5 +804,110 @@ class TestFilterPushdownRead:
         # Optimize once to set best_effort_filter
         first = optimize(manager, filtered)
         # Optimize again — should be stable
+        second_bytes = manager.optimize(first.SerializeToString())
+        assert first.SerializeToString() == second_bytes
+
+
+class TestProjectionPushdown:
+    def test_select_single_column_prunes_unused(self, manager):
+        """select(read([a,b,c,d]), [column(0)]) should prune fields b,c,d."""
+        read = make_read("t", ["a", "b", "c", "d"])
+        selected = pb.select(read, [column(0)])
+        result = optimize(manager, selected)
+
+        root_input = result.relations[0].root.input
+        assert get_rel_type(root_input) == "project"
+        proj = root_input.project
+
+        # Input should have emit pruning unused fields.
+        assert proj.input.read.common.HasField("emit")
+        input_emit = list(proj.input.read.common.emit.output_mapping)
+        assert input_emit == [0]
+
+        # Expression should reference remapped field 0.
+        assert proj.expressions[0].selection.direct_reference.struct_field.field == 0
+
+        # ProjectRel emit: new_input_count(1) + expr_idx(0) = 1.
+        proj_emit = list(proj.common.emit.output_mapping)
+        assert proj_emit == [1]
+
+    def test_select_two_columns_prunes_middle(self, manager):
+        """select(read([a,b,c,d]), [column(0), column(3)]) should prune b,c."""
+        read = make_read("t", ["a", "b", "c", "d"])
+        selected = pb.select(read, [column(0), column(3)])
+        result = optimize(manager, selected)
+
+        root_input = result.relations[0].root.input
+        assert get_rel_type(root_input) == "project"
+        proj = root_input.project
+
+        # Input emit should select only needed fields.
+        assert proj.input.read.common.HasField("emit")
+        input_emit = list(proj.input.read.common.emit.output_mapping)
+        assert input_emit == [0, 3]
+
+        # Expressions should be remapped: ref(0)→ref(0), ref(3)→ref(1).
+        assert proj.expressions[0].selection.direct_reference.struct_field.field == 0
+        assert proj.expressions[1].selection.direct_reference.struct_field.field == 1
+
+        # ProjectRel emit: 2+0=2, 2+1=3.
+        proj_emit = list(proj.common.emit.output_mapping)
+        assert proj_emit == [2, 3]
+
+    def test_select_expression_prunes_unreferenced(self, manager):
+        """select(read([a,b,c,d]), [add(col(0), col(1))]) should prune c,d."""
+        read = make_read("t", ["a", "b", "c", "d"])
+        add_expr = scalar_function(ARITHMETIC_URN, "add", [column(0), column(1)])
+        selected = pb.select(read, [add_expr])
+        result = optimize(manager, selected)
+
+        root_input = result.relations[0].root.input
+        assert get_rel_type(root_input) == "project"
+        proj = root_input.project
+
+        # Input emit should select only needed fields [0, 1].
+        assert proj.input.read.common.HasField("emit")
+        input_emit = list(proj.input.read.common.emit.output_mapping)
+        assert input_emit == [0, 1]
+
+    def test_all_fields_referenced_no_change(self, manager):
+        """select(read([a,b]), [column(0), column(1)]) — all fields needed, no pruning."""
+        read = make_read("t", ["a", "b"])
+        selected = pb.select(read, [column(0), column(1)])
+        result = optimize(manager, selected)
+
+        root_input = result.relations[0].root.input
+        assert get_rel_type(root_input) == "project"
+        proj = root_input.project
+
+        # Input should NOT have an emit (no pruning needed).
+        assert not proj.input.read.common.HasField("emit")
+
+    def test_project_without_emit_no_change(self, manager):
+        """project(read, [expr]) without emit should not trigger the rule."""
+        read = make_read("t", ["a", "b", "c", "d"])
+        projected = pb.project(read, [column(0)])
+        result = optimize(manager, projected)
+
+        root_input = result.relations[0].root.input
+        assert get_rel_type(root_input) == "project"
+        proj = root_input.project
+
+        # No emit on project → rule doesn't fire → input should not have emit.
+        assert not proj.input.read.common.HasField("emit")
+
+    def test_idempotent(self, manager):
+        """Running optimization twice should produce the same result."""
+        read = make_read("t", ["a", "b", "c", "d"])
+        selected = pb.select(read, [column(0)])
+        first = optimize(manager, selected)
+        second_bytes = manager.optimize(first.SerializeToString())
+        assert first.SerializeToString() == second_bytes
+
+    def test_idempotent_two_columns(self, manager):
+        """Two-column select optimization should be idempotent."""
+        read = make_read("t", ["a", "b", "c", "d"])
+        selected = pb.select(read, [column(0), column(3)])
+        first = optimize(manager, selected)
         second_bytes = manager.optimize(first.SerializeToString())
         assert first.SerializeToString() == second_bytes

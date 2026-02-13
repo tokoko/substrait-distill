@@ -29,6 +29,8 @@ CAN_PUSH_RIGHT = {1, 4, 8, 9, 10, 12}
 
 
 def push_filter_through_join(rel: Rel, optimize_rel, fn_names) -> Rel | None:
+    if rel.WhichOneof("rel_type") != "filter":
+        return None
     filter_rel = rel.filter
     input_rel = filter_rel.input
 

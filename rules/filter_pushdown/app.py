@@ -10,6 +10,7 @@ from join import push_filter_through_join
 from merge import merge_adjacent_filters
 from passthrough import push_filter_through_passthrough
 from project import push_filter_through_project
+from projection import prune_project_input
 from read import push_filter_into_read
 from set_op import push_filter_through_set
 
@@ -22,6 +23,7 @@ FILTER_RULES = [
     push_filter_through_set,
     push_filter_through_passthrough,
     push_filter_into_read,
+    prune_project_input,
 ]
 
 
@@ -61,7 +63,7 @@ def _build_fn_names(plan: Plan) -> dict[int, str]:
 
 def _optimize_rel(rel: Rel, fn_names: dict[int, str]) -> Rel:
     """Recursively optimize a relation tree by applying all filter pushdown rules."""
-    if rel.WhichOneof("rel_type") == "filter":
+    if rel.WhichOneof("rel_type") in ("filter", "project"):
         for rule in FILTER_RULES:
             result = rule(
                 rel, lambda r: _optimize_rel(r, fn_names), fn_names

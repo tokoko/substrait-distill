@@ -10,6 +10,8 @@ def push_filter_into_read(rel: Rel, optimize_rel, fn_names) -> Rel | None:
     Only fires when best_effort_filter is not already set to avoid
     infinite loops in the fixed-point optimizer.
     """
+    if rel.WhichOneof("rel_type") != "filter":
+        return None
     filter_rel = rel.filter
     input_rel = filter_rel.input
     if input_rel.WhichOneof("rel_type") != "read":

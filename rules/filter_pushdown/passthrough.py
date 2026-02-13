@@ -10,6 +10,8 @@ PASSTHROUGH_TYPES = ("sort", "fetch")
 
 
 def push_filter_through_passthrough(rel: Rel, optimize_rel, fn_names) -> Rel | None:
+    if rel.WhichOneof("rel_type") != "filter":
+        return None
     filter_rel = rel.filter
     input_rel = filter_rel.input
 

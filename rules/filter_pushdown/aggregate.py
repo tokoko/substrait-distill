@@ -15,6 +15,8 @@ from substrait.algebra_pb2 import Rel
 
 
 def push_filter_through_aggregate(rel: Rel, optimize_rel, fn_names) -> Rel | None:
+    if rel.WhichOneof("rel_type") != "filter":
+        return None
     filter_rel = rel.filter
     input_rel = filter_rel.input
 
