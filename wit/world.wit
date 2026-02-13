@@ -1,0 +1,23 @@
+package substrait-distill:rules;
+
+interface types {
+    record rule-group-info {
+        name: string,
+        description: string,
+    }
+}
+
+interface rule-group {
+    use types.{rule-group-info};
+
+    /// Returns metadata about this rule group.
+    info: func() -> rule-group-info;
+
+    /// Apply optimization rules to a serialized Substrait plan.
+    /// Returns the (possibly modified) serialized plan.
+    optimize: func(plan: list<u8>) -> result<list<u8>, string>;
+}
+
+world distill-plugin {
+    export rule-group;
+}
