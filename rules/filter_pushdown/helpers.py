@@ -33,6 +33,27 @@ def count_output_fields(rel: Rel) -> int | None:
         if input_count is not None:
             return input_count + len(proj.expressions)
 
+    elif rel_type == "join":
+        join = rel.join
+        left_count = (
+            count_output_fields(join.left) if join.HasField("left") else None
+        )
+        right_count = (
+            count_output_fields(join.right) if join.HasField("right") else None
+        )
+        if left_count is not None and right_count is not None:
+            return left_count + right_count
+
+    elif rel_type == "aggregate":
+        agg = rel.aggregate
+        if len(agg.groupings) == 1:
+            return len(agg.groupings[0].grouping_expressions) + len(agg.measures)
+
+    elif rel_type == "set":
+        set_rel = rel.set
+        if len(set_rel.inputs) > 0:
+            return count_output_fields(set_rel.inputs[0])
+
     elif rel_type in ("fetch", "sort"):
         inner = getattr(rel, rel_type)
         if inner.HasField("input"):
@@ -134,16 +155,58 @@ def _adjust_field_indices_in_place(expr: Expression, offset: int) -> None:
             _adjust_field_indices_in_place(expr.if_then.else_, offset)
 
 
+def remap_field_indices(expr: Expression, mapping: dict[int, int]) -> Expression:
+    """Create a copy of the expression with field reference indices remapped according to mapping."""
+    new_expr = Expression()
+    new_expr.CopyFrom(expr)
+    _remap_field_indices_in_place(new_expr, mapping)
+    return new_expr
+
+
+def _remap_field_indices_in_place(expr: Expression, mapping: dict[int, int]) -> None:
+    """Remap field reference indices in-place using a mapping dict."""
+    rex_type = expr.WhichOneof("rex_type")
+
+    if rex_type == "selection":
+        ref = expr.selection
+        if ref.WhichOneof("reference_type") == "direct_reference":
+            segment = ref.direct_reference
+            if segment.WhichOneof("reference_type") == "struct_field":
+                segment.struct_field.field = mapping[segment.struct_field.field]
+
+    elif rex_type == "scalar_function":
+        for arg in expr.scalar_function.arguments:
+            if arg.HasField("value"):
+                _remap_field_indices_in_place(arg.value, mapping)
+
+    elif rex_type == "cast":
+        if expr.cast.HasField("input"):
+            _remap_field_indices_in_place(expr.cast.input, mapping)
+
+    elif rex_type == "if_then":
+        for clause in expr.if_then.ifs:
+            if clause.HasField("if_"):
+                _remap_field_indices_in_place(clause.if_, mapping)
+            if clause.HasField("then"):
+                _remap_field_indices_in_place(clause.then, mapping)
+        if expr.if_then.HasField("else_"):
+            _remap_field_indices_in_place(expr.if_then.else_, mapping)
+
+
 def split_conjunction(
     condition: Expression, fn_names: dict[int, str]
 ) -> list[Expression]:
-    """Split a condition into conjuncts. If condition is an AND scalar_function,
-    return its argument expressions. Otherwise return [condition] as-is."""
+    """Recursively split a condition into conjuncts. Nested AND expressions like
+    AND(AND(a, b), c) are fully flattened to [a, b, c]."""
     if condition.WhichOneof("rex_type") == "scalar_function":
         sf = condition.scalar_function
         name = fn_names.get(sf.function_reference, "")
         if name == "and" or name.startswith("and:"):
-            return [arg.value for arg in sf.arguments if arg.HasField("value")]
+            result = []
+            for arg in sf.arguments:
+                if arg.HasField("value"):
+                    result.extend(split_conjunction(arg.value, fn_names))
+            return result
 
     return [condition]
 

@@ -2,7 +2,7 @@
 
 Handles single predicates referencing one side, and conjunction splitting:
 AND(left_pred, right_pred, mixed_pred) pushes left/right parts to their
-respective sides and keeps mixed above.
+respective sides. Mixed predicates convert the cross join to an inner join.
 """
 
 from helpers import (
@@ -12,7 +12,7 @@ from helpers import (
     make_conjunction,
     split_conjunction,
 )
-from substrait.algebra_pb2 import Rel
+from substrait.algebra_pb2 import JoinRel, Rel
 
 
 def push_filter_through_cross(rel: Rel, optimize_rel, fn_names) -> Rel | None:
@@ -31,21 +31,26 @@ def push_filter_through_cross(rel: Rel, optimize_rel, fn_names) -> Rel | None:
 
     left_preds = []
     right_preds = []
-    remaining_preds = []
+    mixed_preds = []
 
     for conjunct in conjuncts:
         indices = collect_field_indices(conjunct)
         if indices is None:
-            remaining_preds.append(conjunct)
+            mixed_preds.append(conjunct)
         elif all(idx < left_field_count for idx in indices):
             left_preds.append(conjunct)
         elif all(idx >= left_field_count for idx in indices):
             right_preds.append(conjunct)
         else:
-            remaining_preds.append(conjunct)
+            mixed_preds.append(conjunct)
 
-    if not left_preds and not right_preds:
+    if not left_preds and not right_preds and not mixed_preds:
         return None
+
+    # Need at least something actionable: pushable preds or convertible mixed preds.
+    if not left_preds and not right_preds:
+        # Only mixed preds — convert to inner join.
+        pass
 
     # Grab AND metadata for reconstructing conjunctions (if the original was AND).
     sf = filter_rel.condition.scalar_function
@@ -75,19 +80,22 @@ def push_filter_through_cross(rel: Rel, optimize_rel, fn_names) -> Rel | None:
     else:
         built_right = optimize_rel(cross.right)
 
-    # Build the cross join.
-    new_cross = Rel()
-    new_cross.cross.left.CopyFrom(built_left)
-    new_cross.cross.right.CopyFrom(built_right)
-    if cross.HasField("common"):
-        new_cross.cross.common.CopyFrom(cross.common)
-
-    # Wrap with remaining predicates if any.
-    if remaining_preds:
-        remaining_cond = make_conjunction(remaining_preds, func_ref, output_type)
+    # If there are mixed predicates, convert to inner join.
+    if mixed_preds:
+        join_expr = make_conjunction(mixed_preds, func_ref, output_type)
         result = Rel()
-        result.filter.input.CopyFrom(new_cross)
-        result.filter.condition.CopyFrom(remaining_cond)
+        result.join.left.CopyFrom(built_left)
+        result.join.right.CopyFrom(built_right)
+        result.join.expression.CopyFrom(join_expr)
+        result.join.type = JoinRel.JOIN_TYPE_INNER
+        if cross.HasField("common"):
+            result.join.common.CopyFrom(cross.common)
         return result
 
-    return new_cross
+    # No mixed predicates — keep as cross join.
+    result = Rel()
+    result.cross.left.CopyFrom(built_left)
+    result.cross.right.CopyFrom(built_right)
+    if cross.HasField("common"):
+        result.cross.common.CopyFrom(cross.common)
+    return result

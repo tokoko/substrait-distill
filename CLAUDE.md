@@ -47,11 +47,32 @@ uv sync
 Each rule is a function `(rel, optimize_rel, fn_names) -> Rel | None` registered in `FILTER_RULES` in `app.py`. Rules are tried in order; first match wins. `fn_names` is a `dict[int, str]` mapping function anchors to names, built from `Plan.extensions`.
 
 **Rules (in application order):**
-- **cross** (`cross.py`): pushes `Filter(Cross(L,R))` to whichever side the predicate references. Supports conjunction splitting — `AND(left_pred, right_pred, mixed_pred)` pushes left/right parts to their respective sides and keeps mixed above.
+- **merge** (`merge.py`): merges `Filter(Filter(X))` into a single `Filter(AND(outer, inner), X)` and re-optimizes, creating opportunities for other rules. Requires AND function to be registered in the plan.
+- **cross** (`cross.py`): pushes `Filter(Cross(L,R))` to whichever side the predicate references. Mixed predicates (referencing both sides) convert the cross to an inner join: `Filter(Cross(L,R), mixed)` → `Join(L, R, expression=mixed, type=INNER)`. With conjunction splitting, left/right preds are pushed down while mixed preds become the join expression.
+- **join** (`join.py`): pushes `Filter(Join(L,R))` based on join type. INNER: both sides pushable. LEFT/LEFT_SEMI/LEFT_ANTI/LEFT_SINGLE/LEFT_MARK: left-only pushable. RIGHT/RIGHT_SEMI/RIGHT_ANTI/RIGHT_SINGLE/RIGHT_MARK: right-only pushable. OUTER: nothing pushable. Supports conjunction splitting.
 - **project** (`project.py`): pushes `Filter(Project(X))` below when the predicate references only pass-through input fields (not computed expressions) and there's no emit mapping. Also splits AND conjunctions into pushable vs non-pushable parts.
+- **aggregate** (`aggregate.py`): pushes `Filter(Aggregate(X))` below when predicates reference only grouping key columns (single grouping set, simple field references). Remaps output field indices to input field indices via the grouping expressions. Supports conjunction splitting.
+- **set_op** (`set_op.py`): pushes `Filter(Set(A, B, ...))` to all inputs — `Set(Filter(A), Filter(B), ...)`. Safe for all set operation types (union, intersect, except) since filtering all inputs by the same predicate preserves set semantics.
 - **passthrough** (`passthrough.py`): pushes `Filter(X(input))` below schema-preserving operators (sort, fetch). Extend `PASSTHROUGH_TYPES` tuple for new operators.
+- **read** (`read.py`): pushes filter predicate into `ReadRel.best_effort_filter` as a hint to the reader. The Filter rel is kept for correctness — `best_effort_filter` is a hint the reader MAY use (e.g., partition pruning), not a guarantee. Only fires when `best_effort_filter` is not already set.
 
-**Helpers** (`helpers.py`): `count_output_fields`, `collect_field_indices`, `adjust_field_indices`, `split_conjunction`, `make_conjunction`.
+**Child recursion** (`app.py`): `_recurse_children` and `_optimize_rels_in` use protobuf descriptors to generically find and optimize all `Rel` fields, including those nested inside expressions (subquery Rels). No manual per-rel-type enumeration needed.
+
+**Helpers** (`helpers.py`): `count_output_fields`, `collect_field_indices`, `adjust_field_indices`, `remap_field_indices`, `split_conjunction`, `make_conjunction`.
+
+## Predicate Simplification Rules (`rules/predicate_simplification/`)
+
+Simplifies boolean expressions in filter conditions and join expressions. Walks the relation tree, recursively simplifies expressions bottom-up, and removes filters with trivially `true` conditions.
+
+**Expression rules** (`simplify.py`):
+- `AND(true, x)` → `x`, `AND(false, x)` → `false`
+- `OR(true, x)` → `true`, `OR(false, x)` → `x`
+- `NOT(true)` → `false`, `NOT(false)` → `true`, `NOT(NOT(x))` → `x`
+
+**Relation rules** (`app.py`):
+- `Filter(X, true)` → `X` (filter removed entirely)
+
+**Visitor pattern** (`app.py`): Uses a generic `visit(proto_object, handler)` function that walks the entire protobuf message tree via descriptors. Handlers can optionally return a replacement object — `visit` recurses into the replacement first, then applies it via `CopyFrom`. Two passes: (1) simplify all `Expression` nodes, (2) remove all true-condition `Filter` `Rel` nodes.
 
 ## Adding a New Rule Group
 
