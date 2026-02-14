@@ -78,6 +78,77 @@ interface rule-group {
 
 Plans are exchanged as serialized [Substrait](https://substrait.io/) protobuf bytes.
 
+## Examples
+
+Plan trees are shown as relation nodes with their properties. `emit` is the output field mapping — `emit=[0, 2]` means "output only fields 0 and 2 from the input schema".
+
+### Projection pruning + identity project removal
+
+`SELECT id, name FROM employees(id, name, dept, salary)`
+
+```
+ Before:                              After:
+
+ Project  emit=[4, 5]                 Read "employees"  emit=[0, 1]
+ │  exprs: [col(0), col(1)]
+ └─ Read "employees"
+      schema: [id, name, dept, salary]
+```
+
+**Projection pruning** drops `dept` and `salary` by adding `emit=[0, 1]` to the read. **Identity project removal** eliminates the now-redundant ProjectRel — each expression was just a pass-through column reference.
+
+### Filter pushdown through cross join
+
+`SELECT * FROM users u, orders o WHERE is_not_null(u.id)`
+
+```
+ Before:                              After:
+
+ Filter  cond=is_not_null(col(0))     Cross
+ └─ Cross                             ├─ Filter  cond=is_not_null(col(0))
+    ├─ Read "users"                   │  └─ Read "users"
+    │    schema: [id, name, email]    │       schema: [id, name, email]
+    └─ Read "orders"                  │       best_effort_filter: is_not_null(col(0))
+         schema: [user_id, amount]    └─ Read "orders"
+                                           schema: [user_id, amount]
+```
+
+**Filter pushdown** moves the predicate below the cross into the left side (since `col(0)` only references left-side fields). The filter is also set as a **read hint** (`best_effort_filter`) for the reader.
+
+### Multiple rules combined
+
+`SELECT id FROM events(id, ts, type, data) WHERE is_not_null(id) ORDER BY ts`
+
+```
+ Before:                              After:
+
+ Project  emit=[4]                    Filter  emit=[0]
+ │  exprs: [col(0)]                   │  cond: is_not_null(col(0))
+ └─ Filter                           └─ Sort  emit=[0]
+    │  cond: is_not_null(col(0))         │  by: [col(1)]
+    └─ Sort  by=[col(1)]                └─ Read "events"  emit=[0, 1]
+       └─ Read "events"                      schema: [id, ts, type, data]
+            schema: [id, ts, type, data]
+```
+
+**Projection pruning** propagates emit through filter and sort — the read only outputs `id` and `ts` (needed for sorting), dropping `type` and `data`. **Identity project removal** eliminates the wrapper ProjectRel. The read also gets a `best_effort_filter` hint.
+
+### Computed expression pruning
+
+`SELECT name, price+tax FROM products(name, price, tax, category)`
+
+```
+ Before:                              After:
+
+ Project  emit=[0, 4]                 Project  emit=[0, 3]
+ │  exprs: [add(col(1), col(2))]      │  exprs: [add(col(1), col(2))]
+ └─ Read "products"                   └─ Read "products"  emit=[0, 1, 2]
+      schema: [name, price,                 schema: [name, price,
+               tax, category]                        tax, category]
+```
+
+**Projection pruning** determines that only `name`, `price`, and `tax` are needed (from emit pass-through + expression field references), drops `category`. The ProjectRel stays because it computes a non-trivial expression.
+
 ## Built-in Rule Groups
 
 ### rel-rules

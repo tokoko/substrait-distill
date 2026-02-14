@@ -60,7 +60,7 @@ Each rule is a function `(rel, optimize_rel, fn_names) -> Rel | None` registered
 - **project** (`project.py`): pushes `Filter(Project(X))` below when the predicate references only pass-through input fields (not computed expressions) and there's no emit mapping. Also splits AND conjunctions into pushable vs non-pushable parts.
 - **aggregate** (`aggregate.py`): pushes `Filter(Aggregate(X))` below when predicates reference only grouping key columns (single grouping set, simple field references). Remaps output field indices to input field indices via the grouping expressions. Supports conjunction splitting.
 - **set_op** (`set_op.py`): pushes `Filter(Set(A, B, ...))` to all inputs — `Set(Filter(A), Filter(B), ...)`. Safe for all set operation types (union, intersect, except) since filtering all inputs by the same predicate preserves set semantics.
-- **passthrough** (`passthrough.py`): pushes `Filter(X(input))` below schema-preserving operators (sort, fetch). Extend `PASSTHROUGH_TYPES` tuple for new operators.
+- **passthrough** (`passthrough.py`): pushes `Filter(X(input))` below schema-preserving operators (sort, fetch). Bails out if the filter has an emit mapping (would break field references in the child operator). Extend `PASSTHROUGH_TYPES` tuple for new operators.
 - **read** (`read.py`): pushes filter predicate into `ReadRel.best_effort_filter` as a hint to the reader. The Filter rel is kept for correctness — `best_effort_filter` is a hint the reader MAY use (e.g., partition pruning), not a guarantee. Only fires when `best_effort_filter` is not already set.
 
 ### Projection Pruning (`projection_pruning/`)

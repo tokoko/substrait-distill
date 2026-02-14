@@ -13,6 +13,12 @@ def push_filter_through_passthrough(rel: Rel, optimize_rel, fn_names) -> Rel | N
     if rel.WhichOneof("rel_type") != "filter":
         return None
     filter_rel = rel.filter
+
+    # Don't push if filter has an emit — it changes the output schema, which
+    # would break field references in operators like sort.
+    if filter_rel.HasField("common") and filter_rel.common.HasField("emit"):
+        return None
+
     input_rel = filter_rel.input
 
     child_type = input_rel.WhichOneof("rel_type")
